@@ -11,6 +11,7 @@ or fellow on X: [shareAI-Lab](https://x.com/baicai003)
 
 > 10 progressive sections -- every section is a single, runnable Python file.
 > 3 languages (English, Chinese, Japanese) -- code + docs co-located.
+> English also includes OpenAI-backed `*_openai.py` variants that preserve the original teaching flow.
 
 ---
 
@@ -93,6 +94,32 @@ python sessions/zh/s01_agent_loop.py    # Chinese
 python sessions/ja/s01_agent_loop.py    # Japanese
 ```
 
+## OpenAI Track
+
+English sessions also ship with parallel OpenAI-backed entrypoints. They keep the
+original section files unchanged and route Anthropic-style calls through a small
+compatibility layer built on the OpenAI Responses API.
+
+```sh
+# 1. Install the OpenAI track dependencies
+pip install -r requirements.openai.txt
+
+# 2. Configure OpenAI credentials
+cp .env.openai.example .env.openai
+# Edit .env.openai: set OPENAI_API_KEY and OPENAI_MODEL_ID
+# Optional: set OPENAI_BASE_URL for compatible providers
+
+# 3. Run an OpenAI-backed English session
+python sessions/en/s01_agent_loop_openai.py
+python sessions/en/s02_tool_use_openai.py
+python sessions/en/s09_resilience_openai.py
+```
+
+The OpenAI track currently covers the English `sessions/en/*.py` files only.
+The wrapper files are named `*_openai.py` and share two helper modules:
+- `sessions/en/_openai_bootstrap.py` loads the original English session unchanged.
+- `sessions/en/_openai_anthropic_shim.py` translates Anthropic-style calls to OpenAI Responses.
+
 ## Learning Path
 
 Each section adds exactly one new concept. All prior code stays intact:
@@ -130,12 +157,19 @@ claw0/
   README.zh.md           Chinese README
   README.ja.md           Japanese README
   .env.example           Configuration template
+  .env.openai.example    OpenAI configuration template
   requirements.txt       Python dependencies
+  requirements.openai.txt OpenAI track dependencies
   sessions/              All teaching sessions (code + docs)
     en/                  English
       s01_agent_loop.py  s01_agent_loop.md
       s02_tool_use.py    s02_tool_use.md
-      ...                (10 .py + 10 .md)
+      ...
+      s01_agent_loop_openai.py
+      ...
+      s10_concurrency_openai.py
+      _openai_bootstrap.py
+      _openai_anthropic_shim.py
     zh/                  Chinese
       s01_agent_loop.py  s01_agent_loop.md
       ...                (10 .py + 10 .md)
@@ -154,12 +188,25 @@ Each language folder is self-contained: runnable Python code + documentation sid
 ## Prerequisites
 
 - Python 3.11+
-- An API key for Anthropic (or compatible provider)
+- An API key for Anthropic (or compatible provider) for the default track
+- An OpenAI-compatible API key for the English `*_openai.py` track
 
 ## Dependencies
 
 ```
 anthropic>=0.39.0
+python-dotenv>=1.0.0
+websockets>=12.0
+croniter>=2.0.0
+python-telegram-bot>=21.0
+httpx>=0.27.0
+```
+
+OpenAI track dependencies live in `requirements.openai.txt` and replace the
+Anthropic SDK with:
+
+```
+openai>=1.68.0
 python-dotenv>=1.0.0
 websockets>=12.0
 croniter>=2.0.0
