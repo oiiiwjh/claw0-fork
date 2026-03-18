@@ -41,6 +41,7 @@
 - **DeliveryRunner**: 后台线程, 以指数退避处理待投递条目.
 - **chunk_message()**: 按平台大小限制分片文本, 尊重段落边界.
 - **启动恢复扫描**: 启动时自动重试上次崩溃前遗留的待投递条目.
+- **Feishu 适配**: 可选使用官方 `lark-oapi` SDK 将出站消息投递到飞书.
 
 ## 核心代码走读
 
@@ -141,6 +142,43 @@ class DeliveryRunner:
                 self.total_failed += 1
 ```
 
+### 4. Feishu 出站适配
+
+本节默认仍然保留 console mock 渠道, 但如果配置了飞书凭证和投递目标,
+会自动切换到飞书作为默认投递渠道。
+
+```python
+feishu_app_id = os.getenv("FEISHU_APP_ID", "").strip()
+feishu_app_secret = os.getenv("FEISHU_APP_SECRET", "").strip()
+feishu_default_to = os.getenv("FEISHU_DELIVERY_TO", "").strip()
+
+if feishu_app_id and feishu_app_secret and feishu_default_to:
+    feishu_channel = FeishuDeliveryChannel(feishu_app_id, feishu_app_secret)
+    default_channel = "feishu"
+    default_to = feishu_default_to
+```
+
+`FEISHU_DELIVERY_TO` 支持两种写法:
+
+- 显式前缀: `open_id:ou_xxx`, `chat_id:oc_xxx`
+- 无前缀: 使用 `FEISHU_DELIVERY_ID_TYPE` 作为默认类型 (`open_id` / `chat_id` / `user_id` / `union_id` / `email`)
+
+Feishu 发送使用与第 04 节相同的官方 SDK 风格:
+
+```python
+request = CreateMessageRequest.builder() \
+    .receive_id_type(receive_id_type) \
+    .request_body(
+        CreateMessageRequestBody.builder()
+        .receive_id(receive_id)
+        .msg_type("text")
+        .content(json.dumps({"text": text}, ensure_ascii=False))
+        .build()
+    ) \
+    .build()
+response = client.im.v1.message.create(request)
+```
+
 ## 试一试
 
 ```sh
@@ -164,6 +202,21 @@ python zh/s08_delivery.py
 
 # 查看统计数据
 # You > /stats
+```
+
+使用飞书作为默认投递目标:
+
+```sh
+export FEISHU_APP_ID=cli_xxx
+export FEISHU_APP_SECRET=xxx
+export FEISHU_DELIVERY_TO=open_id:ou_xxx
+python zh/s08_delivery.py
+```
+
+启动时会显示:
+
+```text
+Default delivery target: feishu:open_id:ou_xxx
 ```
 
 ## OpenClaw 中的对应实现

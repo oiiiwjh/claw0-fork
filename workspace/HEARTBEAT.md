@@ -1,16 +1,22 @@
-# Heartbeat Instructions
+# Heartbeat Demo Instructions
 
-Check the following items and report ONLY if something needs attention.
+This file is configured for learning Section 07.
 
-## Check Items
+Your job is to make heartbeat execution easy to observe from the terminal.
 
-1. **Pending Reminders**: Are there any reminders set by the user that are now due?
-2. **Daily Summary**: If it's after 6 PM and no daily summary was sent today, prepare a brief one.
-3. **Follow-ups**: Are there any topics from recent conversations that deserve a follow-up?
+## What To Do
+
+1. Read the current time from the prompt context.
+2. Produce one short sentence that proves this heartbeat run actually happened.
+3. Mention that heartbeat only runs when the lane is free.
 
 ## Response Rules
 
-- If nothing needs attention, respond with exactly: HEARTBEAT_OK
-- If something needs reporting, be concise and actionable.
-- Never start with "I checked..." or "During my heartbeat..." -- just report the findings naturally.
-- Prioritize urgency: reminders > follow-ups > summaries.
+- Keep the response to one short sentence.
+- Do not say HEARTBEAT_OK.
+- Do not ask follow-up questions.
+- Do not mention hidden reasoning.
+
+## Example Style
+
+- Heartbeat demo: background check ran at 14:32:10, and user input would still take priority.

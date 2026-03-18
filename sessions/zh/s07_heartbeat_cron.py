@@ -213,6 +213,7 @@ class HeartbeatRunner:
             if not instructions:
                 return
             response = run_agent_single_turn(instructions, sys_prompt)
+            print(response)
             meaningful = self._parse_response(response)
             if meaningful is None:
                 return
@@ -232,7 +233,9 @@ class HeartbeatRunner:
     def _loop(self) -> None:
         while not self._stopped:
             try:
-                ok, _ = self.should_run()
+                ok, res = self.should_run()
+                print_info(f"[heartbeat check loop] should_run={ok} reason={res}")
+                
                 if ok:
                     self._execute()
             except Exception:
