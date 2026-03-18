@@ -112,6 +112,7 @@ def safe_path(raw: str) -> Path:
     target = (WORKDIR / raw).resolve()
     if not str(target).startswith(str(WORKDIR)):
         raise ValueError(f"Path traversal blocked: {raw} resolves outside WORKDIR")
+    print(f"{DIM}wjh> Resolved path: {target}{RESET}")
     return target
 
 
@@ -119,6 +120,7 @@ def truncate(text: str, limit: int = MAX_TOOL_OUTPUT) -> str:
     """截断过长的输出, 并附上提示."""
     if len(text) <= limit:
         return text
+    print(f'wjh> Output truncated from {len(text)} chars to {limit} chars')
     return text[:limit] + f"\n... [truncated, {len(text)} total chars]"
 
 
@@ -396,11 +398,12 @@ def agent_loop() -> None:
             "role": "user",
             "content": user_input,
         })
-
+        print('外循环: 追加 user 消息, 当前消息历史:')
         # --- Step 3: Agent 内循环 ---
         # 模型可能连续调用多个工具才最终给出文本回复.
         # 所以我们用 while True 循环, 直到 stop_reason != "tool_use"
         while True:
+            print('内循环: 调用 API, 当前消息历史:', messages)
             try:
                 response = client.messages.create(
                     model=MODEL_ID,
@@ -411,6 +414,7 @@ def agent_loop() -> None:
                 )
             except Exception as exc:
                 print(f"\n{YELLOW}API Error: {exc}{RESET}\n")
+                # 回滚机制
                 # 出错时回滚本轮所有消息到最近的 user 消息
                 while messages and messages[-1]["role"] != "user":
                     messages.pop()
@@ -441,6 +445,7 @@ def agent_loop() -> None:
                 # response.content 可能包含多个 tool_use block (并行调用)
                 tool_results = []
                 for block in response.content:
+                    print(f"{DIM}wjh> Processing block: {block}{RESET}")
                     if block.type != "tool_use":
                         continue
 

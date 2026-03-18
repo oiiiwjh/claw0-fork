@@ -142,6 +142,26 @@ claw0/
     HEARTBEAT.md  BOOTSTRAP.md  AGENTS.md  MEMORY.md
     CRON.json
     skills/example-skill/SKILL.md
+
+  workspace/
+   |
+   +--> SOUL.md       -> 性格/语气
+   +--> IDENTITY.md   -> 身份/边界
+   +--> TOOLS.md      -> 工具说明
+   +--> USER.md       -> 临时用户上下文
+   +--> MEMORY.md     -> 长期记忆
+   +--> HEARTBEAT.md  -> 主动巡检规则
+   +--> BOOTSTRAP.md  -> 启动背景说明
+   +--> AGENTS.md     -> 多 agent 协作说明
+   +--> CRON.json     -> 定时任务表
+   |
+   +--> skills/
+   |      +--> */SKILL.md -> 可注入技能
+   |
+   +--> memory/       -> 每日记忆日志
+   +--> .sessions/    -> 会话记录
+   +--> .agents/      -> 每个 agent 的状态
+
 ```
 
 每个语言文件夹自包含: 可运行的 Python 代码 + 配套文档. 代码逻辑跨语言一致, 注释和文档因语言而异.

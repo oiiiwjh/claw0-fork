@@ -1,0 +1,20 @@
+{
+    "workbench.colorCustomizations": {
+        "titleBar.activeBackground": "#ceff75",
+        "titleBar.activeForeground": "#000000",
+        "titleBar.inactiveBackground": "#ceff75",
+        "titleBar.inactiveForeground": "#000000",
+        "titleBar.border": "#ceff75",
+        "activityBar.background": "#ceff75",
+        "activityBar.foreground": "#000000",
+        "statusBar.background": "#ceff75",
+        "statusBar.foreground": "#000000",
+        "statusBar.debuggingBackground": "#ceff75",
+        "statusBar.debuggingForeground": "#000000",
+        "tab.activeBorder": "#ceff75",
+        "iLoveWorkSpaceColors": true,
+        "iLoveWorkSpaceRandom": false
+    },
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
+}

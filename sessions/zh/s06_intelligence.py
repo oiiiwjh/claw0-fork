@@ -600,6 +600,7 @@ def tool_memory_search(query: str, top_k: int = 5) -> str:
     results = memory_store.hybrid_search(query, top_k)
     if not results:
         return "No relevant memories found."
+    print(results)
     return "\n".join(f"[{r['path']}] (score: {r['score']}) {r['snippet']}" for r in results)
 
 
@@ -881,7 +882,7 @@ def agent_loop() -> None:
         # 自动记忆搜索 -- 将相关记忆注入系统提示词
         memory_context = _auto_recall(user_input)
         if memory_context:
-            print_info("  [自动召回] 找到相关记忆")
+            print_info("  [自动召回] 找到相关记忆: " + memory_context)
 
         # 每轮重建系统提示词 (记忆可能在上一轮被更新)
         system_prompt = build_system_prompt(

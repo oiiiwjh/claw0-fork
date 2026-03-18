@@ -138,6 +138,117 @@ class AgentConfig:
         return " ".join(parts)
 ```
 
+## Mental Model
+
+You can compress this section into two consecutive decisions:
+
+1. Which agent should handle this message?
+2. Which session inside that agent should this message belong to?
+
+`BindingTable` solves the first question. `build_session_key()` plus `dm_scope`
+solves the second.
+
+```mermaid
+flowchart TD
+    A["Inbound Message
+    (channel, account_id, peer_id, guild_id, text)"] --> B["Gateway"]
+    B --> C["BindingTable.resolve()"]
+
+    C --> C1{"Tier 1
+    peer_id match?"}
+    C1 -- yes --> D["Select agent_id"]
+    C1 -- no --> C2{"Tier 2
+    guild_id match?"}
+    C2 -- yes --> D
+    C2 -- no --> C3{"Tier 3
+    account_id match?"}
+    C3 -- yes --> D
+    C3 -- no --> C4{"Tier 4
+    channel match?"}
+    C4 -- yes --> D
+    C4 -- no --> C5{"Tier 5
+    default match?"}
+    C5 -- yes --> D
+    C5 -- no --> D0["fallback: main"]
+
+    D --> E["AgentManager.get_agent(agent_id)"]
+    D0 --> E
+    E --> F["Load agent config
+    (name, personality, model, dm_scope)"]
+    F --> G["build_session_key()
+    derive session_key from dm_scope"]
+    G --> H["AgentManager.get_session(session_key)
+    load messages[]"]
+    H --> I["append user message"]
+    I --> J["run_agent()"]
+    J --> K{"stop_reason"}
+    K -- tool_use --> L["Run tools and append tool_result"]
+    L --> J
+    K -- end_turn --> M["Return reply text"]
+```
+
+## Why This Design Exists
+
+### Why can't Section 04 just send every message to one default agent?
+
+Because Section 04 only solves "how different platforms become the same
+`InboundMessage`". It does not solve "who should own this message".
+
+If every message goes to one default agent, you get:
+
+- cross-user context leakage
+- cross-platform history mixing
+- no clean separation between agent roles/personalities
+- all entry logic collapsing into one agent
+
+So Section 05 is not optional complexity. It is the minimum dispatch layer
+needed once you have multiple users, multiple channels, or multiple agents.
+
+### Are route rules hard-coded, or model-based with rules as fallback?
+
+In this section, routing is **hard-coded**. `BindingTable.resolve()` walks the
+tiers in order and returns the first match. The model is not asked to decide
+routing first.
+
+That is deliberate. Entry routing should be:
+
+- predictable
+- reproducible
+- debuggable
+- overrideable by config
+
+The model belongs in agent behavior, not in the outermost dispatch layer.
+
+### If routing is wrong, is that an entry-layer bug or an agent-capability bug?
+
+It depends on where the mistake happened:
+
+- wrong `agent_id`: entry/routing layer bug
+- wrong `session_key`: entry/session-isolation layer bug
+- correct agent and session, but bad answer: agent-capability bug
+
+One of the main values of Section 05 is that it separates dispatch failures
+from reasoning failures.
+
+### Where is the boundary between Gateway and Channel?
+
+Shortest version:
+
+- `Channel` handles "how to receive and send"
+- `Gateway` handles "where the received message goes"
+
+More concretely:
+
+- `Channel` deals with platform specifics: Telegram polling, Feishu long
+  connection, CLI stdin/stdout
+- `Gateway` deals with internal dispatch: route resolution, agent selection,
+  session-key construction, agent execution
+
+So:
+
+`Channel` translates the outside world into a unified message.
+`Gateway` decides where that unified message should go inside the system.
+
 ## Try It
 
 ```sh

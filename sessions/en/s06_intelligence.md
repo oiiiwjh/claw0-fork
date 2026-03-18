@@ -41,6 +41,68 @@
 - **_auto_recall()**: searches memory using the user's message, injects results into the prompt.
 - **build_system_prompt()**: assembles 8 layers into a single string, rebuilt every turn.
 
+## Mental Model
+
+The first five sections mainly build the skeleton: loop, tools, sessions,
+channels, routing. Section 06 starts answering a more central question:
+
+`Before each model call, how is the agent's "brain" actually assembled?`
+
+The core chain for this section can be compressed to:
+
+`personality/rules/skills/memory on disk -> build_system_prompt() -> this turn's system prompt`
+
+```mermaid
+flowchart TD
+    A["Startup"] --> B["BootstrapLoader.load_all()"]
+    B --> B1["Read SOUL.md / IDENTITY.md / TOOLS.md / MEMORY.md / ..."]
+    B1 --> B2["Per-file truncation"]
+    B2 --> B3["Total-size cap"]
+    B3 --> C["bootstrap_data"]
+
+    A --> D["SkillsManager.discover()"]
+    D --> D1["Scan skills directories for SKILL.md"]
+    D1 --> D2["Parse frontmatter"]
+    D2 --> D3["Deduplicate by name"]
+    D3 --> E["skills_block"]
+
+    F["Per Turn"] --> G["User Input"]
+    G --> H["_auto_recall(user_input)"]
+    H --> H1["MemoryStore.search_memory()"]
+    H1 --> H2["Load MEMORY.md + daily JSONL"]
+    H2 --> H3["TF-IDF / hybrid search"]
+    H3 --> H4["Return top-k relevant memories"]
+    H4 --> I["memory_context"]
+
+    C --> J["build_system_prompt()"]
+    E --> J
+    I --> J
+
+    J --> J1["Layer 1: Identity"]
+    J1 --> J2["Layer 2: Soul"]
+    J2 --> J3["Layer 3: Tools Guidance"]
+    J3 --> J4["Layer 4: Skills"]
+    J4 --> J5["Layer 5: Memory"]
+    J5 --> J6["Layer 6: Bootstrap Context"]
+    J6 --> J7["Layer 7: Runtime Context"]
+    J7 --> J8["Layer 8: Channel Hints"]
+
+    J8 --> K["Final system prompt"]
+    G --> L["messages[] append user input"]
+    K --> M["LLM API Call"]
+    L --> M
+    M --> N["Assistant Response"]
+
+    N --> O{"Need to write memory?"}
+    O -- yes --> P["MemoryStore.write_memory()"]
+    O -- no --> Q["Next turn"]
+    P --> Q
+```
+
+Shortest version:
+
+`06 = static personality + dynamic memory + runtime context -> rebuild the brain every turn`
+
 ## Key Code Walkthrough
 
 ### 1. build_system_prompt() -- the 8-layer assembly
@@ -158,6 +220,58 @@ system_prompt = build_system_prompt(
     skills_block=skills_block, memory_context=memory_context,
 )
 ```
+
+## Why This Design Exists
+
+### Why should `SOUL.md` appear in an earlier layer?
+
+Because earlier prompt layers exert stronger behavioral influence. `SOUL.md`
+defines personality and speaking style, so it should appear right after
+Identity and before tools/skills. That makes tone and behavior more stable.
+
+### Why not stuff all memory into the prompt permanently?
+
+Because not every memory is relevant to the current turn. If all memory is
+always present:
+
+- tokens get wasted on irrelevant context
+- important memories get diluted
+- the prompt grows bloated over time
+
+Auto-recall exists so that only memories relevant to the current user message
+are injected into this turn's brain.
+
+### Why must `build_system_prompt()` be rebuilt every turn instead of once at startup?
+
+Because at least three categories may have changed since the last turn:
+
+- different user input means different recalled memories
+- different runtime context such as time, channel, or agent ID
+- the memory store itself may already have changed
+
+So in a real agent, the system prompt is not a static config string. It is a
+dynamic per-turn assembly.
+
+### How does this section relate to the first five?
+
+The first five sections build the agent's "body":
+
+- loop
+- tool use
+- sessions
+- channels
+- routing
+
+Section 06 starts building the "brain":
+
+- identity
+- personality
+- skills
+- memory
+- runtime awareness
+
+So Section 06 is not just another feature. It is the first place where all the
+previous structure gets filled with actual intelligence content.
 
 ## Try It
 

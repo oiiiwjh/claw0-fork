@@ -89,10 +89,12 @@ def agent_loop() -> None:
     print()
 
     while True:
+        print(messages)
         # --- 获取用户输入 ---
         try:
-            user_input = input(colored_prompt()).strip()
-        except (KeyboardInterrupt, EOFError):
+            user_input = input(colored_prompt()).strip() # 会停在这
+        # 可以捕获 Ctrl+C 或 Ctrl+D 优雅退出
+        except (KeyboardInterrupt, EOFError): 
             print(f"\n{DIM}再见.{RESET}")
             break
 
@@ -123,6 +125,7 @@ def agent_loop() -> None:
             continue
 
         # --- 检查 stop_reason ---
+        print(f"\n{DIM}[API 响应] stop_reason={response.stop_reason}{RESET}\n")
         if response.stop_reason == "end_turn":
             assistant_text = ""
             for block in response.content:

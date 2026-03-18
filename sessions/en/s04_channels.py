@@ -35,6 +35,18 @@ try:
 except ImportError:
     HAS_HTTPX = False
 
+try:
+    import lark_oapi as lark
+    from lark_oapi.api.im.v1 import (
+        CreateMessageRequest,
+        CreateMessageRequestBody,
+        P2ImMessageMessageReadV1,
+        P2ImMessageReceiveV1,
+    )
+    HAS_LARK_SDK = True
+except ImportError:
+    HAS_LARK_SDK = False
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -369,53 +381,34 @@ class FeishuChannel(Channel):
     name = "feishu"
 
     def __init__(self, account: ChannelAccount) -> None:
-        if not HAS_HTTPX:
-            raise RuntimeError("FeishuChannel requires httpx: pip install httpx")
+        if not HAS_LARK_SDK:
+            raise RuntimeError("FeishuChannel requires lark-oapi: pip install lark-oapi")
         self.account_id = account.account_id
         self.app_id = account.config.get("app_id", "")
         self.app_secret = account.config.get("app_secret", "")
-        self._encrypt_key = account.config.get("encrypt_key", "")
         self._bot_open_id = account.config.get("bot_open_id", "")
-        is_lark = account.config.get("is_lark", False)
-        self.api_base = ("https://open.larksuite.com/open-apis" if is_lark
-                         else "https://open.feishu.cn/open-apis")
-        self._tenant_token: str = ""
-        self._token_expires_at: float = 0.0
-        self._http = httpx.Client(timeout=15.0)
+        self._queue: list[InboundMessage] = []
+        self._queue_lock = threading.Lock()
+        log_level = lark.LogLevel.DEBUG if os.getenv("FEISHU_DEBUG", "").lower() in ("1", "true") else lark.LogLevel.INFO
+        self._client = lark.Client.builder() \
+            .app_id(self.app_id) \
+            .app_secret(self.app_secret) \
+            .log_level(log_level) \
+            .build()
+        self._ws_client: Any = None
 
-    def _refresh_token(self) -> str:
-        if self._tenant_token and time.time() < self._token_expires_at:
-            return self._tenant_token
-        try:
-            resp = self._http.post(
-                f"{self.api_base}/auth/v3/tenant_access_token/internal",
-                json={"app_id": self.app_id, "app_secret": self.app_secret},
-            )
-            data = resp.json()
-            if data.get("code") != 0:
-                print(f"  {RED}[feishu] Token error: {data.get('msg', '?')}{RESET}")
-                return ""
-            self._tenant_token = data.get("tenant_access_token", "")
-            self._token_expires_at = time.time() + data.get("expire", 7200) - 300
-            return self._tenant_token
-        except Exception as exc:
-            print(f"  {RED}[feishu] Token error: {exc}{RESET}")
-            return ""
-
-    def _bot_mentioned(self, event: dict) -> bool:
-        for m in event.get("message", {}).get("mentions", []):
-            mid = m.get("id", {})
-            if isinstance(mid, dict) and mid.get("open_id") == self._bot_open_id:
+    def _bot_mentioned(self, message: Any) -> bool:
+        for mention in getattr(message, "mentions", []) or []:
+            mention_id = getattr(mention, "id", None)
+            if getattr(mention_id, "open_id", "") == self._bot_open_id:
                 return True
-            if isinstance(mid, str) and mid == self._bot_open_id:
-                return True
-            if m.get("key") == self._bot_open_id:
+            if getattr(mention, "key", "") == self._bot_open_id:
                 return True
         return False
 
-    def _parse_content(self, message: dict) -> tuple[str, list]:
-        msg_type = message.get("msg_type", "text")
-        raw = message.get("content", "{}")
+    def _parse_content(self, message: Any) -> tuple[str, list]:
+        msg_type = getattr(message, "message_type", "text")
+        raw = getattr(message, "content", "{}")
         try:
             content = json.loads(raw) if isinstance(raw, str) else raw
         except json.JSONDecodeError:
@@ -447,55 +440,89 @@ class FeishuChannel(Channel):
             return "[image]", media
         return "", media
 
-    def parse_event(self, payload: dict, token: str = "") -> InboundMessage | None:
-        """Parse a Feishu event callback. Simple token check for verification."""
-        if self._encrypt_key and token and token != self._encrypt_key:
-            print(f"  {RED}[feishu] Token verification failed{RESET}")
-            return None
-        if "challenge" in payload:
-            print_info(f"[feishu] Challenge: {payload['challenge']}")
-            return None
-
-        event = payload.get("event", {})
-        message = event.get("message", {})
-        sender = event.get("sender", {}).get("sender_id", {})
-        user_id = sender.get("open_id", sender.get("user_id", ""))
-        chat_id = message.get("chat_id", "")
-        chat_type = message.get("chat_type", "")
+    def parse_event(self, data: P2ImMessageReceiveV1) -> InboundMessage | None:
+        event = getattr(data, "event", None)
+        message = getattr(event, "message", None)
+        sender = getattr(event, "sender", None)
+        sender_id = getattr(sender, "sender_id", None)
+        user_id = getattr(sender_id, "open_id", "") or getattr(sender_id, "user_id", "")
+        chat_id = getattr(message, "chat_id", "")
+        chat_type = getattr(message, "chat_type", "")
+        message_type = getattr(message, "message_type", "")
         is_group = chat_type == "group"
 
-        if is_group and self._bot_open_id and not self._bot_mentioned(event):
+        print_info(
+            f"[feishu] event=im.message.receive_v1 chat_type={chat_type or '?'} "
+            f"message_type={message_type or '?'} sender={user_id or '?'}"
+        )
+
+        if is_group and self._bot_open_id and not self._bot_mentioned(message):
+            print_info("[feishu] dropped group message: bot not mentioned or FEISHU_BOT_OPEN_ID mismatch")
             return None
 
         text, media = self._parse_content(message)
         if not text:
+            print_info("[feishu] dropped message: unsupported or empty content")
             return None
 
         return InboundMessage(
             text=text, sender_id=user_id, channel="feishu",
             account_id=self.account_id,
-            peer_id=user_id if chat_type == "p2p" else chat_id,
-            media=media, is_group=is_group, raw=payload,
+            peer_id=(f"open_id:{user_id}" if chat_type == "p2p"
+                     else f"chat_id:{chat_id}"),
+            media=media, is_group=is_group, raw={"event_type": "im.message.receive_v1"},
         )
 
+    def _on_message_receive(self, data: P2ImMessageReceiveV1) -> None:
+        print_info("[feishu] callback received from long connection")
+        inbound = self.parse_event(data)
+        if inbound is not None:
+            with self._queue_lock:
+                self._queue.append(inbound)
+            print_info(f"[feishu] queued inbound message from {inbound.sender_id}")
+
+    def _on_message_read(self, data: P2ImMessageMessageReadV1) -> None:
+        return
+
+    def start_long_connection(self) -> None:
+        event_handler = lark.EventDispatcherHandler.builder("", "") \
+            .register_p2_im_message_message_read_v1(self._on_message_read) \
+            .register_p2_im_message_receive_v1(self._on_message_receive) \
+            .build()
+        self._ws_client = lark.ws.Client(
+            self.app_id,
+            self.app_secret,
+            event_handler=event_handler,
+            log_level=lark.LogLevel.DEBUG if os.getenv("FEISHU_DEBUG", "").lower() in ("1", "true") else lark.LogLevel.INFO,
+        )
+        self._ws_client.start()
+
     def receive(self) -> InboundMessage | None:
-        return None
+        with self._queue_lock:
+            return self._queue.pop(0) if self._queue else None
 
     def send(self, to: str, text: str, **kwargs: Any) -> bool:
-        token = self._refresh_token()
-        if not token:
-            return False
+        receive_id_type = "chat_id"
+        receive_id = to
+        if to.startswith("open_id:"):
+            receive_id_type = "open_id"
+            receive_id = to.split(":", 1)[1]
+        elif to.startswith("chat_id:"):
+            receive_id = to.split(":", 1)[1]
         try:
-            resp = self._http.post(
-                f"{self.api_base}/im/v1/messages",
-                params={"receive_id_type": "chat_id"},
-                headers={"Authorization": f"Bearer {token}"},
-                json={"receive_id": to, "msg_type": "text",
-                      "content": json.dumps({"text": text})},
-            )
-            data = resp.json()
-            if data.get("code") != 0:
-                print(f"  {RED}[feishu] Send: {data.get('msg', '?')}{RESET}")
+            request = CreateMessageRequest.builder() \
+                .receive_id_type(receive_id_type) \
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                    .receive_id(receive_id)
+                    .msg_type("text")
+                    .content(json.dumps({"text": text}, ensure_ascii=False))
+                    .build()
+                ) \
+                .build()
+            response = self._client.im.v1.message.create(request)
+            if not response.success():
+                print(f"  {RED}[feishu] Send: {response.msg} (code={response.code}){RESET}")
                 return False
             return True
         except Exception as exc:
@@ -503,7 +530,7 @@ class FeishuChannel(Channel):
             return False
 
     def close(self) -> None:
-        self._http.close()
+        return
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -597,6 +624,7 @@ def telegram_poll_loop(
             print(f"  {RED}[telegram] Poll error: {exc}{RESET}")
             stop.wait(5.0)
 
+
 # ---------------------------------------------------------------------------
 # REPL commands
 # ---------------------------------------------------------------------------
@@ -689,10 +717,12 @@ def agent_loop() -> None:
     mgr.register(cli)
 
     tg_channel: TelegramChannel | None = None
+    fs_channel: FeishuChannel | None = None
     stop_event = threading.Event()
     msg_queue: list[InboundMessage] = []
     q_lock = threading.Lock()
     tg_thread: threading.Thread | None = None
+    fs_thread: threading.Thread | None = None
 
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if tg_token and HAS_HTTPX:
@@ -711,18 +741,22 @@ def agent_loop() -> None:
 
     fs_id = os.getenv("FEISHU_APP_ID", "").strip()
     fs_secret = os.getenv("FEISHU_APP_SECRET", "").strip()
-    if fs_id and fs_secret and HAS_HTTPX:
+    if fs_id and fs_secret and HAS_LARK_SDK:
         fs_acc = ChannelAccount(
             channel="feishu", account_id="feishu-primary",
             config={
                 "app_id": fs_id, "app_secret": fs_secret,
-                "encrypt_key": os.getenv("FEISHU_ENCRYPT_KEY", ""),
                 "bot_open_id": os.getenv("FEISHU_BOT_OPEN_ID", ""),
-                "is_lark": os.getenv("FEISHU_IS_LARK", "").lower() in ("1", "true"),
             },
         )
         mgr.accounts.append(fs_acc)
-        mgr.register(FeishuChannel(fs_acc))
+        fs_channel = FeishuChannel(fs_acc)
+        mgr.register(fs_channel)
+        fs_thread = threading.Thread(target=fs_channel.start_long_connection, daemon=True)
+        fs_thread.start()
+        print_channel("  [feishu] Long connection started via official SDK")
+    elif fs_id and fs_secret:
+        print(f"{YELLOW}[feishu] lark-oapi not installed; run: pip install lark-oapi{RESET}")
 
     print_info("=" * 60)
     print_info("  claw0  |  Section 04: Channels")
@@ -743,8 +777,15 @@ def agent_loop() -> None:
             print_channel(f"\n  [telegram] {m.sender_id}: {m.text[:80]}")
             run_agent_turn(m, conversations, mgr)
 
-        # CLI input (non-blocking when Telegram is active)
-        if tg_channel:
+        while fs_channel:
+            m = fs_channel.receive()
+            if m is None:
+                break
+            print_channel(f"\n  [feishu] {m.sender_id}: {m.text[:80]}")
+            run_agent_turn(m, conversations, mgr)
+
+        # CLI input (non-blocking when background channels are active)
+        if tg_channel or fs_channel:
             import select
             if not select.select([sys.stdin], [], [], 0.5)[0]:
                 continue
@@ -775,6 +816,8 @@ def agent_loop() -> None:
     stop_event.set()
     if tg_thread and tg_thread.is_alive():
         tg_thread.join(timeout=3.0)
+    if fs_thread and fs_thread.is_alive():
+        fs_thread.join(timeout=1.0)
     mgr.close_all()
 
 # ---------------------------------------------------------------------------

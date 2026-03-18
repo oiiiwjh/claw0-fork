@@ -41,6 +41,67 @@
 - **_auto_recall()**: 用用户消息搜索记忆, 将结果注入提示词.
 - **build_system_prompt()**: 将 8 个层组装为一个字符串, 每轮重新构建.
 
+## 心智模型
+
+前五节主要在搭系统骨架: 循环、工具、会话、通道、路由。第六节开始回答一个更核心的问题:
+
+`agent 每一轮调用模型之前, "脑子"到底是怎么被组装出来的?`
+
+这一节的核心链路可以压成:
+
+`磁盘上的人格/规则/技能/记忆 -> build_system_prompt() -> 当前这一轮的 system prompt`
+
+```mermaid
+flowchart TD
+    A["Startup"] --> B["BootstrapLoader.load_all()"]
+    B --> B1["读取 SOUL.md / IDENTITY.md / TOOLS.md / MEMORY.md / ..."]
+    B1 --> B2["单文件截断"]
+    B2 --> B3["总长度上限控制"]
+    B3 --> C["bootstrap_data"]
+
+    A --> D["SkillsManager.discover()"]
+    D --> D1["扫描 skills 目录中的 SKILL.md"]
+    D1 --> D2["解析 frontmatter"]
+    D2 --> D3["按名称去重"]
+    D3 --> E["skills_block"]
+
+    F["Per Turn"] --> G["User Input"]
+    G --> H["_auto_recall(user_input)"]
+    H --> H1["MemoryStore.search_memory()"]
+    H1 --> H2["加载 MEMORY.md + daily JSONL"]
+    H2 --> H3["TF-IDF / 混合搜索"]
+    H3 --> H4["返回 top-k 相关记忆"]
+    H4 --> I["memory_context"]
+
+    C --> J["build_system_prompt()"]
+    E --> J
+    I --> J
+
+    J --> J1["Layer 1: Identity"]
+    J1 --> J2["Layer 2: Soul"]
+    J2 --> J3["Layer 3: Tools Guidance"]
+    J3 --> J4["Layer 4: Skills"]
+    J4 --> J5["Layer 5: Memory"]
+    J5 --> J6["Layer 6: Bootstrap Context"]
+    J6 --> J7["Layer 7: Runtime Context"]
+    J7 --> J8["Layer 8: Channel Hints"]
+
+    J8 --> K["最终 system prompt"]
+    G --> L["messages[] append user input"]
+    K --> M["LLM API Call"]
+    L --> M
+    M --> N["Assistant Response"]
+
+    N --> O{"需要写入记忆?"}
+    O -- yes --> P["MemoryStore.write_memory()"]
+    O -- no --> Q["下一轮"]
+    P --> Q
+```
+
+最短理解就是:
+
+`06 = 静态人格 + 动态记忆 + 运行时上下文 -> 每轮重建大脑`
+
 ## 核心代码走读
 
 ### 1. build_system_prompt() -- 8 层组装
@@ -158,6 +219,53 @@ system_prompt = build_system_prompt(
     skills_block=skills_block, memory_context=memory_context,
 )
 ```
+
+## 为什么要这样设计
+
+### 为什么 `SOUL.md` 要放在前面的层?
+
+因为系统提示词越靠前的层, 对模型行为的影响越强。`SOUL.md` 代表人格和说话方式,
+所以它应该在 Identity 之后、工具和技能之前注入, 这样 agent 的语气和行为风格更稳定。
+
+### 为什么记忆不是固定塞进提示词, 而是每轮搜索后再注入?
+
+因为并不是所有记忆都和当前问题相关。如果把所有记忆长期塞进 system prompt:
+
+- token 会被无关信息占满
+- 重要记忆会被稀释
+- 提示词会越来越臃肿
+
+自动召回的作用是: 只在当前用户输入和某段记忆相关时, 才把那段记忆临时放进这一轮的大脑。
+
+### 为什么 `build_system_prompt()` 必须每轮重建, 而不是启动时只构建一次?
+
+因为这一轮和上一轮相比, 至少有三类信息可能已经变化:
+
+- 用户输入不同, 导致自动召回的记忆不同
+- 运行时上下文不同, 比如时间、通道、agent ID
+- 记忆存储本身已经更新
+
+所以 system prompt 在真实 agent 中不是静态配置, 而是一个每轮动态组装的结果。
+
+### 这一节和前五节的关系是什么?
+
+前五节解决的是 agent 的"身体":
+
+- 如何循环
+- 如何调工具
+- 如何存会话
+- 如何接通道
+- 如何做路由
+
+第六节开始解决 agent 的"脑子":
+
+- 身份
+- 性格
+- 技能
+- 记忆
+- 运行时感知
+
+所以 `06` 不是单独的功能模块, 而是前面所有结构第一次被真正灌入"智能内容"的地方。
 
 ## 试一试
 
