@@ -42,6 +42,162 @@
 - **重试限制**: `BASE_RETRY=24`, `PER_PROFILE=8`, 上限为 `min(max(base + per_profile * N, 32), 160)`.
 - **SimulatedFailure**: 为下次 API 调用装备一个模拟错误, 让你无需真实故障即可观察各类失败的处理过程.
 
+## 先记一句话
+
+这一节是在给 agent 加上"失败后别直接死掉"的能力. 一次调用失败后, 系统不会立刻退出, 而是先判断失败类型, 再决定是换 key、压缩上下文, 还是换备选模型继续执行.
+
+可以把整章压缩成这个公式:
+
+```text
+run() = profile 轮换 + overflow 恢复 + tool-use loop
+```
+
+其中:
+- `ProfileManager` 负责"谁能上场"
+- `classify_failure()` 负责"失败属于哪一类"
+- `ContextGuard` 负责"上下文太长怎么缩"
+- `_run_attempt()` 负责"真正把模型和工具跑起来"
+
+## 阅读顺序建议
+
+如果你第一次看这一节, 建议按下面顺序读:
+
+1. 先看 `classify_failure()`, 理解错误如何分流.
+2. 再看 `ProfileManager`, 理解 key 冷却和轮换.
+3. 最后看 `ResilienceRunner.run()`, 理解三层重试如何串起来.
+
+这样进入 `run()` 时, 你已经知道:
+- 失败会被分成什么类别
+- 某个 profile 失败后会被如何处理
+- 为什么有些错误是"压缩后重试", 有些错误是"换 key"
+
+## 主流程图
+
+下面这张图对应整个 `ResilienceRunner.run()` 的主线:
+
+```mermaid
+flowchart TD
+    A["用户输入"] --> B["ResilienceRunner.run()"]
+    B --> C["Layer 1: 选择可用 profile / API key"]
+    C --> D{"有可用 profile 吗?"}
+    D -- 否 --> M["尝试 fallback models"]
+    D -- 是 --> E["创建该 profile 对应 client"]
+
+    E --> F["Layer 2: overflow 恢复循环"]
+    F --> G["Layer 3: _run_attempt() tool-use loop"]
+
+    G --> H{"调用成功?"}
+    H -- 是 --> I["mark_success(profile)"]
+    I --> J["返回结果"]
+
+    H -- 否 --> K["classify_failure(exc)"]
+    K --> L{"失败类型?"}
+
+    L -- overflow --> N["截断 tool 输出 / 压缩历史"]
+    N --> F
+
+    L -- auth --> O["mark_failure(profile, 300s cooldown)"]
+    O --> C
+
+    L -- rate_limit --> P["mark_failure(profile, 120s cooldown)"]
+    P --> C
+
+    L -- timeout --> Q["mark_failure(profile, 60s cooldown)"]
+    Q --> C
+
+    L -- billing --> R["mark_failure(profile, 300s cooldown)"]
+    R --> C
+
+    L -- unknown --> S["mark_failure(profile, 默认冷却)"]
+    S --> C
+
+    M --> T{"fallback model 成功?"}
+    T -- 是 --> J
+    T -- 否 --> U["raise RuntimeError"]
+```
+
+把这张图记成三句话就够了:
+
+1. 先换 `profile`
+2. 再压 `context`
+3. 最后继续跑 `tool loop`
+
+## 代码结构图
+
+下面这张图更贴近代码组织, 适合对照 `s09_resilience.py` 阅读:
+
+```mermaid
+flowchart TD
+    A["main / REPL 接收用户输入"] --> B["ResilienceRunner.run(system, messages, tools)"]
+
+    B --> C["ProfileManager.select_profile()"]
+    C --> D{"拿到可用 AuthProfile?"}
+
+    D -- 否 --> E["进入 fallback_models 循环"]
+    E --> F{"fallback 成功?"}
+    F -- 是 --> Z["返回 response, messages"]
+    F -- 否 --> X["抛出 RuntimeError"]
+
+    D -- 是 --> G["基于 profile.api_key 创建 API client"]
+    G --> H["layer2_messages = 当前消息副本"]
+    H --> I["for compact_attempt in range(MAX_OVERFLOW_COMPACTION)"]
+
+    I --> J["调用 _run_attempt(client, model, system, layer2_messages, tools)"]
+
+    J --> K{"_run_attempt 成功返回?"}
+    K -- 是 --> L["ProfileManager.mark_success(profile)"]
+    L --> Z
+
+    K -- 否 --> M["classify_failure(exc)"]
+    M --> N{"FailoverReason"}
+
+    N -- overflow --> O["ContextGuard.truncate_tool_results()"]
+    O --> P["ContextGuard.compact_history()"]
+    P --> I
+
+    N -- auth --> Q["mark_failure(profile, auth, 300s)"]
+    Q --> C
+
+    N -- rate_limit --> R["mark_failure(profile, rate_limit, 120s)"]
+    R --> C
+
+    N -- timeout --> S["mark_failure(profile, timeout, 60s)"]
+    S --> C
+
+    N -- billing --> T["mark_failure(profile, billing, 300s)"]
+    T --> C
+
+    N -- unknown --> U["mark_failure(profile, unknown, 默认冷却)"]
+    U --> C
+```
+
+## _run_attempt() 内部流程图
+
+最内层 `_run_attempt()` 负责真正的 tool-use loop, 它本身不处理 profile 轮换或上下文压缩, 只负责持续调用模型直到结束或抛错:
+
+```mermaid
+flowchart TD
+    A["_run_attempt(...)"] --> B["current_messages = list(messages)"]
+    B --> C["while iteration < max_iterations"]
+
+    C --> D["api_client.messages.create(...)"]
+    D --> E["把 assistant response 追加到 current_messages"]
+
+    E --> F{"response.stop_reason"}
+
+    F -- end_turn --> G["返回 response, current_messages"]
+
+    F -- tool_use --> H["遍历 response.content 中的 tool_use block"]
+    H --> I["process_tool_call(name, input)"]
+    I --> J["组装 tool_result 列表"]
+    J --> K["追加一条 user/tool_result 消息"]
+    K --> C
+
+    F -- 其他/超限 --> L["继续或最终抛错"]
+    C --> M{"超过 max_iterations?"}
+    M -- 是 --> N["raise RuntimeError"]
+```
+
 ## 核心代码走读
 
 ### 1. classify_failure() -- 将异常路由到正确的层

@@ -43,6 +43,62 @@
 - **Recovery scan**: on startup, pending entries from a previous crash are automatically retried.
 - **Feishu adapter**: can optionally use the official `lark-oapi` SDK for Feishu outbound delivery.
 
+## Mental Model
+
+This section is not solving "how to generate a reply". It is solving:
+
+`after content is generated, how do we maximize the chance it is delivered, and avoid losing it even if the process crashes?`
+
+It cleanly separates two responsibilities that are easy to mix together:
+
+- the agent produces content
+- the delivery layer makes delivery reliable
+
+```mermaid
+flowchart TD
+    A["Agent Reply / Heartbeat / Cron Output"] --> B["chunk_message()"]
+    B --> B1["split by platform limits
+    telegram=4096, discord=2000, feishu=4096, ..."]
+
+    B1 --> C["DeliveryQueue.enqueue()"]
+    C --> C1["generate delivery_id"]
+    C1 --> C2["write .tmp.{pid}.{id}.json"]
+    C2 --> C3["flush + fsync()"]
+    C3 --> C4["os.replace() -> {id}.json"]
+    C4 --> D["queue entry is now durably on disk"]
+
+    D --> E["DeliveryRunner
+    background thread scans every 1s"]
+    E --> F["load_pending()"]
+
+    F --> G{"next_retry_at <= now ?"}
+    G -- no --> H["skip until later scan"]
+    G -- yes --> I["deliver_fn(channel, to, text)"]
+
+    I --> J{"delivery success?"}
+    J -- yes --> K["ack()"]
+    K --> K1["delete queue/{id}.json"]
+    K1 --> L["delivery complete"]
+
+    J -- no --> M["fail()"]
+    M --> M1["retry_count += 1"]
+    M1 --> M2["record last_error"]
+    M2 --> M3["compute backoff + jitter"]
+    M3 --> M4["update next_retry_at and rewrite entry"]
+
+    M4 --> N{"retry_count >= 5 ?"}
+    N -- no --> O["wait for next retry"]
+    N -- yes --> P["move_to_failed()"]
+    P --> P1["move to failed/{id}.json"]
+
+    Q["process restart"] --> R["Recovery Scan"]
+    R --> F
+```
+
+Compressed to one sentence:
+
+`08 = first turn a message into a durable delivery object on disk, then wrap retries, recovery, and failure archival around the send attempt.`
+
 ## Key Code Walkthrough
 
 ### 1. DeliveryQueue.enqueue() + atomic write
@@ -179,6 +235,77 @@ request = CreateMessageRequest.builder() \
     .build()
 response = client.im.v1.message.create(request)
 ```
+
+## Why This Design Exists
+
+### Why must we "write to disk first, then send"?
+
+Because the system is not really trying to guarantee "we tried to send it". It
+is trying to guarantee:
+
+`once a message is generated, it is hard to lose.`
+
+If you send first and persist later, there is a dangerous gap:
+
+- the message has already been generated
+- its state has not yet been safely recorded
+- the process crashes
+
+At that point you do not know whether the message was actually delivered, and
+you have no durable local record to recover from.
+
+By writing first and sending second:
+
+- as soon as `enqueue()` succeeds, the message is durably recorded locally
+- even if delivery crashes, restart recovery can continue from disk
+- "generation succeeded" and "delivery succeeded" are clearly separated
+
+This is essentially a write-ahead / outbox pattern.
+
+### Where is the boundary between Delivery and Channel?
+
+Shortest version:
+
+- `delivery` is responsible for arranging reliable sending
+- `channel` is responsible for the concrete act of sending to a platform
+
+More concretely:
+
+`delivery` cares about:
+
+- enqueueing
+- persistence
+- retries
+- backoff
+- failure archival
+- recovery scans
+- delivery state management
+
+`channel` cares about:
+
+- which platform API to call
+- how receiver IDs are represented
+- what the platform size limits are
+- what errors are raised for one failed send attempt
+
+So:
+
+`channel.send(...)` is one send attempt. `delivery runner` is the reliability orchestration wrapped around that attempt.
+
+### How does this section relate to Section 07?
+
+Section 07 gave the agent the ability to run proactively:
+
+- heartbeat can inspect on its own
+- cron can execute on its own
+
+But Section 07 only pushed those outputs into in-memory queues. Section 08
+takes the next step:
+
+`how do we reliably get those proactively generated results out into the world?`
+
+So Section 08 can be seen as the reliability upgrade for the output side of
+Section 07.
 
 ## Try It
 

@@ -43,6 +43,62 @@
 - **启动恢复扫描**: 启动时自动重试上次崩溃前遗留的待投递条目.
 - **Feishu 适配**: 可选使用官方 `lark-oapi` SDK 将出站消息投递到飞书.
 
+## 心智模型
+
+这一节解决的不是"怎么生成回复", 而是:
+
+`生成出来以后, 怎么保证它尽量送达, 并且即使进程崩了也不丢。`
+
+它把两件原本容易混在一起的事拆开了:
+
+- agent 负责产出内容
+- delivery 层负责可靠送达
+
+```mermaid
+flowchart TD
+    A["Agent Reply / Heartbeat / Cron Output"] --> B["chunk_message()"]
+    B --> B1["按平台限制分片
+    telegram=4096, discord=2000, feishu=4096, ..."]
+
+    B1 --> C["DeliveryQueue.enqueue()"]
+    C --> C1["生成 delivery_id"]
+    C1 --> C2["写 .tmp.{pid}.{id}.json"]
+    C2 --> C3["flush + fsync()"]
+    C3 --> C4["os.replace() -> {id}.json"]
+    C4 --> D["队列文件已可靠落盘"]
+
+    D --> E["DeliveryRunner
+    后台线程每 1s 扫描"]
+    E --> F["load_pending()"]
+
+    F --> G{"next_retry_at <= now ?"}
+    G -- no --> H["跳过, 等下次扫描"]
+    G -- yes --> I["deliver_fn(channel, to, text)"]
+
+    I --> J{"发送成功?"}
+    J -- yes --> K["ack()"]
+    K --> K1["删除 queue/{id}.json"]
+    K1 --> L["投递完成"]
+
+    J -- no --> M["fail()"]
+    M --> M1["retry_count += 1"]
+    M1 --> M2["记录 last_error"]
+    M2 --> M3["计算 backoff + jitter"]
+    M3 --> M4["更新 next_retry_at 并写回磁盘"]
+
+    M4 --> N{"retry_count >= 5 ?"}
+    N -- no --> O["等待下次重试"]
+    N -- yes --> P["move_to_failed()"]
+    P --> P1["移动到 failed/{id}.json"]
+
+    Q["进程重启"] --> R["Recovery Scan"]
+    R --> F
+```
+
+可以把本节压成一句话:
+
+`08 = 先把消息作为可靠投递对象写入磁盘, 再围绕发送过程做重试、恢复和失败归档。`
+
 ## 核心代码走读
 
 ### 1. DeliveryQueue.enqueue() + 原子写入
@@ -178,6 +234,73 @@ request = CreateMessageRequest.builder() \
     .build()
 response = client.im.v1.message.create(request)
 ```
+
+## 为什么要这样设计
+
+### 为什么一定要"先写磁盘, 再发送"?
+
+因为系统真正想保证的不是"尝试发过", 而是:
+
+`这条消息一旦生成, 就不容易丢。`
+
+如果反过来先发送再落盘, 就会存在一个危险窗口:
+
+- 消息已经生成
+- 还没来得及记录状态
+- 进程崩溃
+
+这时你既不知道消息到底有没有送出, 也没有本地记录可以恢复。
+
+而"先写磁盘, 再发送"的好处是:
+
+- 只要 `enqueue()` 成功, 这条消息就已经 durable 地保存在本地
+- 即使发送阶段崩溃, 重启后也能通过 recovery scan 继续处理
+- "生成成功"和"投递成功"被清楚地区分开
+
+这本质上是一种 write-ahead / outbox 思想。
+
+### Delivery 和 Channel 的边界在哪里?
+
+最短定义:
+
+- `delivery` 负责"可靠地安排发送"
+- `channel` 负责"真正怎么发出去"
+
+更具体地说:
+
+`delivery` 关心的是:
+
+- 入队
+- 落盘
+- 重试
+- 退避
+- 失败归档
+- 恢复扫描
+- 投递状态管理
+
+`channel` 关心的是:
+
+- 调哪个平台 API
+- 平台的接收方 ID 怎么表示
+- 平台的消息大小限制是多少
+- 一次发送失败时抛出什么错误
+
+所以:
+
+`channel.send(...)` 是一次发送尝试, `delivery runner` 则是在这次尝试外围包上一层可靠性编排。
+
+### 这一节和第 07 节是什么关系?
+
+第 07 节让 agent 具备了主动运行的能力:
+
+- heartbeat 会主动巡检
+- cron 会主动执行任务
+
+但第 07 节里的输出只是先进入内存队列。第 08 节进一步解决:
+
+`这些主动产生的结果, 怎样才能可靠送出去?`
+
+所以第 08 节可以看作是对第 07 节输出通道的可靠化升级。
 
 ## 试一试
 
