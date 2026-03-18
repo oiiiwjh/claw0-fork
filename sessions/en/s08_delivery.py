@@ -50,6 +50,13 @@ from typing import Any, Callable
 from dotenv import load_dotenv
 from anthropic import Anthropic
 
+try:
+    import lark_oapi as lark
+    from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+    HAS_LARK_SDK = True
+except ImportError:
+    HAS_LARK_SDK = False
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -311,6 +318,7 @@ CHANNEL_LIMITS: dict[str, int] = {
     "telegram": 4096,
     "telegram_caption": 1024,
     "discord": 2000,
+    "feishu": 4096,
     "whatsapp": 4096,
     "default": 4096,
 }
@@ -457,6 +465,46 @@ class MockDeliveryChannel:
 
     def set_fail_rate(self, rate: float) -> None:
         self.fail_rate = max(0.0, min(1.0, rate))
+
+
+class FeishuDeliveryChannel:
+    def __init__(self, app_id: str, app_secret: str):
+        if not HAS_LARK_SDK:
+            raise RuntimeError("Feishu delivery requires lark-oapi: pip install lark-oapi")
+        self.name = "feishu"
+        log_level = lark.LogLevel.DEBUG if os.getenv("FEISHU_DEBUG", "").lower() in ("1", "true") else lark.LogLevel.INFO
+        self._client = lark.Client.builder() \
+            .app_id(app_id) \
+            .app_secret(app_secret) \
+            .log_level(log_level) \
+            .build()
+
+    def _resolve_receive_target(self, to: str) -> tuple[str, str]:
+        if ":" in to:
+            target_type, target_value = to.split(":", 1)
+            target_type = target_type.strip().lower()
+            if target_type in ("open_id", "chat_id", "user_id", "union_id", "email"):
+                return target_type, target_value.strip()
+        default_type = os.getenv("FEISHU_DELIVERY_ID_TYPE", "open_id").strip().lower() or "open_id"
+        return default_type, to.strip()
+
+    def send(self, to: str, text: str) -> None:
+        receive_id_type, receive_id = self._resolve_receive_target(to)
+        request = CreateMessageRequest.builder() \
+            .receive_id_type(receive_id_type) \
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(receive_id)
+                .msg_type("text")
+                .content(json.dumps({"text": text}, ensure_ascii=False))
+                .build()
+            ) \
+            .build()
+        response = self._client.im.v1.message.create(request)
+        if not response.success():
+            raise ConnectionError(f"[feishu] send failed code={response.code} msg={response.msg}")
+        preview = text[:60].replace("\n", " ")
+        print_delivery(f"[feishu:{receive_id_type}] -> {receive_id}: {preview}...")
 
 
 # ---------------------------------------------------------------------------
@@ -684,6 +732,9 @@ def handle_repl_command(
         return True
 
     if cmd == "/simulate-failure":
+        if mock_channel is None:
+            print_info("  simulate-failure is only available for the console mock channel.")
+            return True
         if mock_channel.fail_rate > 0:
             mock_channel.set_fail_rate(0.0)
             print_info(f"  {mock_channel.name} fail rate -> 0% (reliable)")
@@ -722,13 +773,36 @@ def agent_loop() -> None:
     memory = MemoryStore()
     system_prompt = soul.get_system_prompt()
 
-    mock_channel = MockDeliveryChannel("console", fail_rate=0.0)
+    feishu_app_id = os.getenv("FEISHU_APP_ID", "").strip()
+    feishu_app_secret = os.getenv("FEISHU_APP_SECRET", "").strip()
+    feishu_default_to = os.getenv("FEISHU_DELIVERY_TO", "").strip()
+
+    mock_channel: MockDeliveryChannel | None = None
+    feishu_channel: FeishuDeliveryChannel | None = None
     default_channel = "console"
     default_to = "user"
+
+    if feishu_app_id and feishu_app_secret and feishu_default_to:
+        if HAS_LARK_SDK:
+            feishu_channel = FeishuDeliveryChannel(feishu_app_id, feishu_app_secret)
+            default_channel = "feishu"
+            default_to = feishu_default_to
+        else:
+            print_warn("FEISHU_APP_ID/SECRET detected but lark-oapi is not installed; falling back to console delivery.")
+
+    if feishu_channel is None:
+        mock_channel = MockDeliveryChannel("console", fail_rate=0.0)
 
     queue = DeliveryQueue()
 
     def deliver_fn(channel: str, to: str, text: str) -> None:
+        if channel == "feishu":
+            if feishu_channel is None:
+                raise ConnectionError("Feishu delivery requested but Feishu channel is not configured.")
+            feishu_channel.send(to, text)
+            return
+        if mock_channel is None:
+            raise ConnectionError("Console delivery requested but mock channel is unavailable.")
         mock_channel.send(to, text)
 
     runner = DeliveryRunner(queue, deliver_fn)
@@ -748,6 +822,7 @@ def agent_loop() -> None:
     print_info("  claw0  |  Section 08: Delivery")
     print_info(f"  Model: {MODEL_ID}")
     print_info(f"  Queue: {QUEUE_DIR}")
+    print_info(f"  Default delivery target: {default_channel}:{default_to}")
     print_info("  Commands:")
     print_info("    /queue             - show pending deliveries")
     print_info("    /failed            - show failed deliveries")

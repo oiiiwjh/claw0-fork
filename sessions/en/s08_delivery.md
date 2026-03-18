@@ -41,6 +41,7 @@
 - **DeliveryRunner**: background thread that processes pending entries with exponential backoff.
 - **chunk_message()**: splits text by platform size limits, respecting paragraph boundaries.
 - **Recovery scan**: on startup, pending entries from a previous crash are automatically retried.
+- **Feishu adapter**: can optionally use the official `lark-oapi` SDK for Feishu outbound delivery.
 
 ## Key Code Walkthrough
 
@@ -141,6 +142,44 @@ class DeliveryRunner:
                 self.total_failed += 1
 ```
 
+### 4. Feishu outbound delivery
+
+This section still keeps the console mock channel by default, but if Feishu
+credentials and a delivery target are configured, it switches the default
+delivery channel to Feishu.
+
+```python
+feishu_app_id = os.getenv("FEISHU_APP_ID", "").strip()
+feishu_app_secret = os.getenv("FEISHU_APP_SECRET", "").strip()
+feishu_default_to = os.getenv("FEISHU_DELIVERY_TO", "").strip()
+
+if feishu_app_id and feishu_app_secret and feishu_default_to:
+    feishu_channel = FeishuDeliveryChannel(feishu_app_id, feishu_app_secret)
+    default_channel = "feishu"
+    default_to = feishu_default_to
+```
+
+`FEISHU_DELIVERY_TO` supports two styles:
+
+- explicit prefix: `open_id:ou_xxx`, `chat_id:oc_xxx`
+- no prefix: use `FEISHU_DELIVERY_ID_TYPE` as the default type (`open_id` / `chat_id` / `user_id` / `union_id` / `email`)
+
+Feishu sending uses the same official SDK style introduced earlier:
+
+```python
+request = CreateMessageRequest.builder() \
+    .receive_id_type(receive_id_type) \
+    .request_body(
+        CreateMessageRequestBody.builder()
+        .receive_id(receive_id)
+        .msg_type("text")
+        .content(json.dumps({"text": text}, ensure_ascii=False))
+        .build()
+    ) \
+    .build()
+response = client.im.v1.message.create(request)
+```
+
 ## Try It
 
 ```sh
@@ -164,6 +203,21 @@ python en/s08_delivery.py
 
 # Check statistics
 # You > /stats
+```
+
+Use Feishu as the default delivery target:
+
+```sh
+export FEISHU_APP_ID=cli_xxx
+export FEISHU_APP_SECRET=xxx
+export FEISHU_DELIVERY_TO=open_id:ou_xxx
+python en/s08_delivery.py
+```
+
+Startup will show:
+
+```text
+Default delivery target: feishu:open_id:ou_xxx
 ```
 
 ## How OpenClaw Does It
