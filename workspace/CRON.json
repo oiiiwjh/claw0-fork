@@ -1,6 +1,21 @@
 {
   "jobs": [
     {
+      "id": "demo-every-15s",
+      "name": "Demo Every 15s",
+      "enabled": true,
+      "schedule": {
+        "kind": "every",
+        "every_seconds": 15,
+        "anchor": "2026-03-18T00:00:00+08:00"
+      },
+      "payload": {
+        "kind": "system_event",
+        "text": "Cron demo: this fixed job fires every 15 seconds."
+      },
+      "delete_after_run": false
+    },
+    {
       "id": "morning-briefing",
       "name": "Morning Briefing",
       "enabled": true,
@@ -50,7 +65,7 @@
       "enabled": true,
       "schedule": {
         "kind": "every",
-        "every_seconds": 3600,
+        "every_seconds": 10,
         "anchor": "2026-02-24T00:00:00+08:00"
       },
       "payload": {
